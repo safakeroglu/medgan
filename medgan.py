@@ -3,8 +3,6 @@ import tensorflow as tf
 import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
-from tensorflow.contrib.layers import l2_regularizer
-from tensorflow.contrib.layers import batch_norm
 
 _VALIDATION_RATIO = 0.1
 
@@ -28,12 +26,12 @@ class Medgan(object):
         self.dataType = dataType
 
         if dataType == 'binary':
-            self.aeActivation = tf.nn.tanh
+            self.aeActivation = tf.keras.activations.tanh
         else:
-            self.aeActivation = tf.nn.relu
+            self.aeActivation = tf.keras.activations.relu
 
-        self.generatorActivation = tf.nn.relu
-        self.discriminatorActivation = tf.nn.relu
+        self.generatorActivation = tf.keras.activations.relu
+        self.discriminatorActivation = tf.keras.activations.relu
         self.discriminatorDims = discriminatorDims
         self.compressDims = list(compressDims) + [embeddingDim]
         self.decompressDims = list(decompressDims) + [inputDim]
@@ -51,62 +49,85 @@ class Medgan(object):
 
     def buildAutoencoder(self, x_input):
         decodeVariables = {}
-        with tf.variable_scope('autoencoder', regularizer=l2_regularizer(self.l2scale)):
-            tempVec = x_input
-            tempDim = self.inputDim
-            i = 0
-            for compressDim in self.compressDims:
-                W = tf.get_variable('aee_W_'+str(i), shape=[tempDim, compressDim])
-                b = tf.get_variable('aee_b_'+str(i), shape=[compressDim])
-                tempVec = self.aeActivation(tf.add(tf.matmul(tempVec, W), b))
-                tempDim = compressDim
-                i += 1
-    
-            i = 0
-            for decompressDim in self.decompressDims[:-1]:
-                W = tf.get_variable('aed_W_'+str(i), shape=[tempDim, decompressDim])
-                b = tf.get_variable('aed_b_'+str(i), shape=[decompressDim])
-                tempVec = self.aeActivation(tf.add(tf.matmul(tempVec, W), b))
-                tempDim = decompressDim
-                decodeVariables['aed_W_'+str(i)] = W
-                decodeVariables['aed_b_'+str(i)] = b
-                i += 1
-            W = tf.get_variable('aed_W_'+str(i), shape=[tempDim, self.decompressDims[-1]])
-            b = tf.get_variable('aed_b_'+str(i), shape=[self.decompressDims[-1]])
-            decodeVariables['aed_W_'+str(i)] = W
-            decodeVariables['aed_b_'+str(i)] = b
+        regularizer = tf.keras.regularizers.l2(self.l2scale)
+        
+        encoder = tf.keras.Sequential()
+        tempDim = self.inputDim
+        for i, compressDim in enumerate(self.compressDims):
+            encoder.add(tf.keras.layers.Dense(
+                compressDim, 
+                activation=self.aeActivation,
+                kernel_regularizer=regularizer,
+                name=f'encoder_{i}'
+            ))
+            tempDim = compressDim
 
-            if self.dataType == 'binary':
-                x_reconst = tf.nn.sigmoid(tf.add(tf.matmul(tempVec,W),b))
-                loss = tf.reduce_mean(-tf.reduce_sum(x_input * tf.log(x_reconst + 1e-12) + (1. - x_input) * tf.log(1. - x_reconst + 1e-12), 1), 0)
-            else:
-                x_reconst = tf.nn.relu(tf.add(tf.matmul(tempVec,W),b))
-                loss = tf.reduce_mean((x_input - x_reconst)**2)
-            
-        return loss, decodeVariables
+        decoder = tf.keras.Sequential()
+        for i, decompressDim in enumerate(self.decompressDims[:-1]):
+            decoder.add(tf.keras.layers.Dense(
+                decompressDim,
+                activation=self.aeActivation,
+                kernel_regularizer=regularizer,
+                name=f'decoder_{i}'
+            ))
 
-    def buildGenerator(self, x_input, bn_train):
-        tempVec = x_input
+        if self.dataType == 'binary':
+            decoder.add(tf.keras.layers.Dense(
+                self.inputDim,
+                activation='sigmoid',
+                kernel_regularizer=regularizer,
+                name='decoder_out'
+            ))
+        else:
+            decoder.add(tf.keras.layers.Dense(
+                self.inputDim,
+                activation='relu',
+                kernel_regularizer=regularizer,
+                name='decoder_out'
+            ))
+
+        encoded = encoder(x_input)
+        decoded = decoder(encoded)
+
+        if self.dataType == 'binary':
+            loss = tf.reduce_mean(
+                tf.keras.losses.binary_crossentropy(x_input, decoded)
+            )
+        else:
+            loss = tf.reduce_mean(
+                tf.keras.losses.mse(x_input, decoded)
+            )
+
+        return loss, decoder.layers
+
+    def buildGenerator(self, x_input, training):
+        generator = tf.keras.Sequential()
+        
         tempDim = self.randomDim
-        with tf.variable_scope('generator', regularizer=l2_regularizer(self.l2scale)):
-            for i, genDim in enumerate(self.generatorDims[:-1]):
-                W = tf.get_variable('W_'+str(i), shape=[tempDim, genDim])
-                h = tf.matmul(tempVec,W)
-                h2 = batch_norm(h, decay=self.bnDecay, scale=True, is_training=bn_train, updates_collections=None)
-                h3 = self.generatorActivation(h2)
-                tempVec = h3 + tempVec
-                tempDim = genDim
-            W = tf.get_variable('W'+str(i), shape=[tempDim, self.generatorDims[-1]])
-            h = tf.matmul(tempVec,W)
-            h2 = batch_norm(h, decay=self.bnDecay, scale=True, is_training=bn_train, updates_collections=None)
+        for i, genDim in enumerate(self.generatorDims[:-1]):
+            generator.add(tf.keras.layers.Dense(
+                genDim,
+                kernel_regularizer=tf.keras.regularizers.l2(self.l2scale)
+            ))
+            generator.add(tf.keras.layers.BatchNormalization(
+                momentum=self.bnDecay
+            ))
+            generator.add(tf.keras.layers.Activation(self.generatorActivation))
+            
+        if self.dataType == 'binary':
+            generator.add(tf.keras.layers.Dense(
+                self.generatorDims[-1],
+                activation='tanh',
+                kernel_regularizer=tf.keras.regularizers.l2(self.l2scale)
+            ))
+        else:
+            generator.add(tf.keras.layers.Dense(
+                self.generatorDims[-1],
+                activation='relu',
+                kernel_regularizer=tf.keras.regularizers.l2(self.l2scale)
+            ))
 
-            if self.dataType == 'binary':
-                h3 = tf.nn.tanh(h2)
-            else:
-                h3 = tf.nn.relu(h2)
-
-            output = h3 + tempVec
-        return output
+        return generator(x_input, training=training)
     
     def buildGeneratorTest(self, x_input, bn_train):
         tempVec = x_input
