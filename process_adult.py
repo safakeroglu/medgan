@@ -1,3 +1,5 @@
+# Create or update /content/medgan/process_adult.py
+
 import pandas as pd
 import numpy as np
 import pickle
@@ -7,9 +9,11 @@ from sklearn.preprocessing import LabelEncoder
 def process_adult_data(csv_file: Path, output_file: Path):
     """Process Adult dataset for medGAN."""
     print('Loading and processing Adult dataset')
+    print(f'Reading file from: {csv_file}')
     
     # Read the CSV file
     data = pd.read_csv(csv_file)
+    print(f'Successfully loaded data with shape: {data.shape}')
     
     # Convert all columns to numeric using LabelEncoder
     encoders = {}
@@ -38,6 +42,10 @@ def process_adult_data(csv_file: Path, output_file: Path):
     return matrix, encoders
 
 if __name__ == '__main__':
-    input_file = Path('train_Adult_cleaned.csv')
-    output_file = Path('adult_processed')
+    input_file = Path('/content/medgan/train_Adult_cleaned.csv')
+    output_file = Path('/content/medgan/adult_processed')
+    
+    if not input_file.exists():
+        raise FileNotFoundError(f"Input file not found at {input_file}")
+        
     process_adult_data(input_file, output_file)
